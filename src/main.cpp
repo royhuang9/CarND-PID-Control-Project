@@ -4,8 +4,21 @@
 #include "PID.h"
 #include <math.h>
 
+#include <condition_variable>
+#include <mutex>
+
+#include <thread>
+#include <chrono>
+
+#include <random>
+
+using namespace std;
+
 // for convenience
 using json = nlohmann::json;
+
+// switch for turn on twiddle or not
+bool enable_twiddle = false;
 
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
@@ -33,9 +46,98 @@ int main()
   uWS::Hub h;
 
   PID pid;
+  
   // TODO: Initialize the pid variable.
+  double p[3] = {2.24621, 0.0, 13.1953};
+  double dp[3] = {0.158598, 0.0581498, 0.480625};
 
-  h.onMessage([&pid](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
+  double total_error = 0.0;
+  double error = HUGE_VAL;
+  double best_err = HUGE_VAL;
+
+  unsigned int steps_th = 100;
+  unsigned int steps_lmt = 900;
+  unsigned int steps_cnt = 0;
+  
+  bool first_step = true;
+
+  random_device rdev{};
+  default_random_engine gen{rdev()};
+  
+  normal_distribution<double> p_ran(0, 1);
+
+  pid.Init(p[0], p[1], p[2]);
+  
+  /* mutex and conditional variable */
+  std::mutex m;
+  std::condition_variable cond_var;
+  bool error_updated = false;
+
+  auto wait_for_error = [&]() {
+      std::unique_lock<std::mutex> lock(m);
+      while (!error_updated) {
+          cond_var.wait(lock);
+      }
+  };
+
+  auto notifying = [&]() {
+      std::unique_lock<std::mutex> lock(m);
+      error_updated = true;
+      cond_var.notify_one();
+  };
+
+
+    /* Adjust pid according to error */
+    std::thread adjust_pid([&]() {
+      if (!enable_twiddle) {
+          return;
+      }
+      /* notify onMessage to run */
+      cout<<"Thread adjust_pid started" << endl;
+      error_updated = false;
+      wait_for_error();
+
+      best_err = error;
+
+      unsigned int it = 0;
+      while ((dp[0] + dp[1] + dp[2]) > 0.2) {
+        cout << "\nIteration " << it << " best_err: "<<best_err<<endl;
+
+        for(int i=0; i < 3; i++) {
+          p[i] += dp[i];
+          pid.Init(p[0], p[1], p[2]);
+
+          /* notify onMessage to run */
+          error_updated = false;
+          wait_for_error();
+
+          if (error < best_err) {
+            best_err = error;
+            dp[i] *= 1.1;
+          } else {
+            p[i] -= 2* dp[i];
+
+            error_updated  = false;
+            wait_for_error();
+
+            if (error < best_err){
+              best_err = error;
+              dp[i] *= 1.1;
+
+            } else {
+              p[i] += dp[i];
+              dp[i] *= 0.9;
+            }
+          }
+        }
+        it ++;
+      }
+
+      cout<<"Thread adjust_pid exit"<<endl;
+    });
+
+  
+  h.onMessage([&](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
@@ -57,16 +159,57 @@ int main()
           * NOTE: Feel free to play around with the throttle and speed. Maybe use
           * another PID controller to control the speed!
           */
+          steps_cnt ++;
           
-          // DEBUG
-          std::cout << "CTE: " << cte << " Steering Value: " << steer_value << std::endl;
+          if (enable_twiddle && (cte > 2.2 || steps_cnt > steps_lmt)) {
+            
+            if (steps_cnt < steps_th) {
+                total_error = HUGE_VAL;
+            }
+            error = total_error / (steps_cnt - steps_th);
+            cout << "step_cnt:" << steps_cnt << " total_error:"<<total_error<<" error:"<<error<<endl;
+            cout<<"p[0]=" << p[0] << " p[1]=" << p[1] << " p[2]=" << p[2] << endl;
+            cout<<"dp[0]=" << dp[0] << " dp[1]=" << dp[1] << " dp[2]=" << dp[2] << endl;
+            notifying();
 
-          json msgJson;
-          msgJson["steering_angle"] = steer_value;
-          msgJson["throttle"] = 0.3;
-          auto msg = "42[\"steer\"," + msgJson.dump() + "]";
-          std::cout << msg << std::endl;
-          ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+            while (error_updated == true)
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+            /* send reset command */
+            std::string reset_msg = "42[\"reset\",{}]";
+            ws.send(reset_msg.data(), reset_msg.length(), uWS::OpCode::TEXT);
+
+            //cout<<reset_msg<<endl;
+            
+            /* reset error */
+            total_error = 0;
+            error = HUGE_VAL;
+            steps_cnt = 0;
+            
+            first_step = true;
+
+          } else {
+            if (steps_cnt > steps_th) {
+                total_error += cte*cte;
+            }
+            if (first_step) {
+                pid.p_error = cte;
+                first_step = false;
+            }
+            pid.UpdateError(cte);
+
+            steer_value = pid.Steering();
+
+            // DEBUG
+            //std::cout << "CTE: " << cte << " Steering Value: " << steer_value << std::endl;
+
+            json msgJson;
+            msgJson["steering_angle"] = steer_value;
+            msgJson["throttle"] = 0.3;
+            auto msg = "42[\"steer\"," + msgJson.dump() + "]";
+            //std::cout << msg << std::endl;
+            ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+          }
         }
       } else {
         // Manual driving
@@ -111,4 +254,8 @@ int main()
     return -1;
   }
   h.run();
+  
+  /* wait for adjust pid to complete */
+  adjust_pid.join();
+  
 }
