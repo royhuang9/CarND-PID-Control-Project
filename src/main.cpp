@@ -1,16 +1,14 @@
 #include <uWS/uWS.h>
 #include <iostream>
-#include "json.hpp"
-#include "PID.h"
-#include <math.h>
-
-#include <condition_variable>
-#include <mutex>
-
 #include <thread>
 #include <chrono>
+#include <mutex>
+#include <condition_variable>
 
-#include <random>
+#include <cmath>
+
+#include "json.hpp"
+#include "PID.h"
 
 using namespace std;
 
@@ -18,7 +16,10 @@ using namespace std;
 using json = nlohmann::json;
 
 // switch for turn on twiddle or not
-bool enable_twiddle = false;
+bool enable_twiddle_angle = false;
+bool enable_twiddle_speed = false;
+
+const double cte_limit = 1.8;
 
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
@@ -45,97 +46,39 @@ int main()
 {
   uWS::Hub h;
 
-  PID pid;
+  PID SteerPID;
+  PID SpeedPID;
   
-  // TODO: Initialize the pid variable.
-  double p[3] = {2.24621, 0.0, 13.1953};
-  double dp[3] = {0.158598, 0.0581498, 0.480625};
+  /*
+   * Determination of Kp, Ki, Kd. I got these parameters by twiddling as what is taught in course.
+   * First I set Kp, Ki, Kd to zeros and dp[3] = {1,1,1} and enable twiddle. Every time when the cte 
+   * is bigger than cte_limit=1.8, it will stop and check the average cte error.
+   */
+  //double steerP[3] = {2.50853, 0.0119725, 13.4343};
+  //double steerDp[3] = {0.001824, 0.000366288, 0.00456821};
 
-  double total_error = 0.0;
-  double error = HUGE_VAL;
-  double best_err = HUGE_VAL;
-
-  unsigned int steps_th = 100;
-  unsigned int steps_lmt = 900;
-  unsigned int steps_cnt = 0;
+  double steerP[3] = {0.918412, 0.0176985, 9.28444};
+  double steerDp[3] = {0.00441108, 0.00360905, 0.00813502};
   
-  bool first_step = true;
-
-  random_device rdev{};
-  default_random_engine gen{rdev()};
+  SteerPID.Init(steerP, steerDp);
+  SteerPID.ResetState();
   
-  normal_distribution<double> p_ran(0, 1);
-
-  pid.Init(p[0], p[1], p[2]);
+  /* The initial value for Speed parameters are Kp = 0.5, Ki = 0, Kd = 1 */
+  /* It also be twiddled b as what is taught in course */
+  //double speedP[3] = {2.40481, 0.0, 12.2864};
+  //double speedDp[3] = {0.12718, 0.0381521, 0.428237};
+  double speedP[3] = {3.53998, 0.0, -1.05401};
+  double speedDp[3] = {0.505395, 0.185302, 0.375914};
   
-  /* mutex and conditional variable */
-  std::mutex m;
-  std::condition_variable cond_var;
-  bool error_updated = false;
+  SpeedPID.Init(speedP, speedDp);
+  SpeedPID.ResetState();
 
-  auto wait_for_error = [&]() {
-      std::unique_lock<std::mutex> lock(m);
-      while (!error_updated) {
-          cond_var.wait(lock);
-      }
-  };
-
-  auto notifying = [&]() {
-      std::unique_lock<std::mutex> lock(m);
-      error_updated = true;
-      cond_var.notify_one();
-  };
-
-
-    /* Adjust pid according to error */
-    std::thread adjust_pid([&]() {
-      if (!enable_twiddle) {
-          return;
-      }
-      /* notify onMessage to run */
-      cout<<"Thread adjust_pid started" << endl;
-      error_updated = false;
-      wait_for_error();
-
-      best_err = error;
-
-      unsigned int it = 0;
-      while ((dp[0] + dp[1] + dp[2]) > 0.2) {
-        cout << "\nIteration " << it << " best_err: "<<best_err<<endl;
-
-        for(int i=0; i < 3; i++) {
-          p[i] += dp[i];
-          pid.Init(p[0], p[1], p[2]);
-
-          /* notify onMessage to run */
-          error_updated = false;
-          wait_for_error();
-
-          if (error < best_err) {
-            best_err = error;
-            dp[i] *= 1.1;
-          } else {
-            p[i] -= 2* dp[i];
-
-            error_updated  = false;
-            wait_for_error();
-
-            if (error < best_err){
-              best_err = error;
-              dp[i] *= 1.1;
-
-            } else {
-              p[i] += dp[i];
-              dp[i] *= 0.9;
-            }
-          }
-        }
-        it ++;
-      }
-
-      cout<<"Thread adjust_pid exit"<<endl;
-    });
-
+  if (enable_twiddle_angle) {
+      SteerPID.twiddle();
+  }
+  if (enable_twiddle_speed) {
+      SpeedPID.twiddle();
+  }
   
   h.onMessage([&](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -152,60 +95,60 @@ int main()
           double cte = std::stod(j[1]["cte"].get<std::string>());
           double speed = std::stod(j[1]["speed"].get<std::string>());
           double angle = std::stod(j[1]["steering_angle"].get<std::string>());
-          double steer_value;
+          double steer_angle, steer_speed;
           /*
           * TODO: Calcuate steering value here, remember the steering value is
           * [-1, 1].
           * NOTE: Feel free to play around with the throttle and speed. Maybe use
           * another PID controller to control the speed!
           */
-          steps_cnt ++;
-          
-          if (enable_twiddle && (cte > 2.2 || steps_cnt > steps_lmt)) {
-            
-            if (steps_cnt < steps_th) {
-                total_error = HUGE_VAL;
-            }
-            error = total_error / (steps_cnt - steps_th);
-            cout << "step_cnt:" << steps_cnt << " total_error:"<<total_error<<" error:"<<error<<endl;
-            cout<<"p[0]=" << p[0] << " p[1]=" << p[1] << " p[2]=" << p[2] << endl;
-            cout<<"dp[0]=" << dp[0] << " dp[1]=" << dp[1] << " dp[2]=" << dp[2] << endl;
-            notifying();
+          bool bSteerPIDCnt = SteerPID.UpdateCnt();
+          bool bSpeedPIDCnt = SpeedPID.UpdateCnt();
 
-            while (error_updated == true)
+          if ((enable_twiddle_angle || enable_twiddle_speed ) && (cte > cte_limit || !bSteerPIDCnt || !bSpeedPIDCnt)) {
+            //cout << "bSpeedPIDCnt=" << bSpeedPIDCnt << " steps_cnt=" << SpeedPID.steps_cnt << endl;
+            //cout << "cte=" << cte << " cte_limit=" << cte_limit << endl;
+            
+            if (enable_twiddle_angle) {
+                SteerPID.TotalError();
+                SteerPID.notifying();
+            }
+            
+            if (enable_twiddle_speed) {
+                SpeedPID.TotalError();
+                SpeedPID.notifying();
+            }
+            
+
+            while (SteerPID.error_updated || SpeedPID.error_updated)
               std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
             /* send reset command */
             std::string reset_msg = "42[\"reset\",{}]";
             ws.send(reset_msg.data(), reset_msg.length(), uWS::OpCode::TEXT);
 
+            SteerPID.ResetState();
+            SpeedPID.ResetState();
+
             //cout<<reset_msg<<endl;
-            
-            /* reset error */
-            total_error = 0;
-            error = HUGE_VAL;
-            steps_cnt = 0;
-            
-            first_step = true;
-
           } else {
-            if (steps_cnt > steps_th) {
-                total_error += cte*cte;
-            }
-            if (first_step) {
-                pid.p_error = cte;
-                first_step = false;
-            }
-            pid.UpdateError(cte);
 
-            steer_value = pid.Steering();
+            SteerPID.UpdateError(cte);
+            steer_angle = SteerPID.Steering();
+
+            /* Get hint from 
+             * https://github.com/jendrikjoe/UdacityProjects/blob/master/src/main.cpp
+             */
+            double target_speed = 30.*(1.-abs(steer_angle)) + 20.;
+            SpeedPID.UpdateError(speed - target_speed);
+            steer_speed = SpeedPID.Steering();
 
             // DEBUG
-            //std::cout << "CTE: " << cte << " Steering Value: " << steer_value << std::endl;
+            //std::cout << "CTE: " << cte << " Steering Value: " << steer_angle << std::endl;
 
             json msgJson;
-            msgJson["steering_angle"] = steer_value;
-            msgJson["throttle"] = 0.3;
+            msgJson["steering_angle"] = steer_angle;
+            msgJson["throttle"] = steer_speed;
             auto msg = "42[\"steer\"," + msgJson.dump() + "]";
             //std::cout << msg << std::endl;
             ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
@@ -256,6 +199,7 @@ int main()
   h.run();
   
   /* wait for adjust pid to complete */
-  adjust_pid.join();
+  SteerPID.adjust_pid.join();
+  SpeedPID.adjust_pid.join();
   
 }
