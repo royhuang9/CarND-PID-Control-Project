@@ -2,6 +2,19 @@
 Self-Driving Car Engineer Nanodegree Program
 
 ---
+## Reflection
+
+I implemented twiddle algorithm and tried two different initial PID parameters, {0, 0, 0} and {0.5, 0.0, 1.0} for steering angle. With different initial value, after some time auto-tuning with twiddle it turns out different final PID value. When initial value is {0,0,0}, the final PID value is {2.50853, 0.0119725, 13.4343}, and the car can drive several laps. When initial value is {0.5, 0.0, 1.0}, the final PID value is {0.918412, 0.0176985, 9.28444}, and the car can drive very well too. I think there are many choices for PID value.
+
+There is also a PID parameters for speed. Steering angle is tuned first, then speed PID is tuned later. I refer to someone's post in the forum to get the target speed formula. I also observe the car adjust steer angle very sharply and I think the people in car will not feel comfortable.
+
+The P, I, and D parameters play different roles for steering angle. These are:
+
+* P generates a steering correction proportional to the cross track error (cte). The higher the P value, the larger and more responsive the correction is. However, a too large P would result in overshooting and oscillation in steering control. So I perfer the second value of P 0.918.
+
+* I plays an indispensable role if there is a drift in the system. It generates a control signal that is proportional to the accumulation of the cte over time. There is no much drift issue with the simulator, so I choose the initial value 0. After twiddle, the I value is as small as 0.0176.
+
+* D contributes a correction proportional to the changing rate of the cte. It helps 'damp' the overshooting caused by P. However, if D is overly large, it would induce too much damping and make the system hard to take prompt responses.
 
 ## Dependencies
 
